@@ -30,6 +30,11 @@ const char index_html[] PROGMEM = R"rawliteral(
 
   <button onclick="send()">Apply</button>
 
+  <p>Accel X: %ACCEL_X%</p>
+  <p>Accel Y: %ACCEL_Y%</p>
+  <p>Accel Z: %ACCEL_Z%</p>
+
+
   <script>
     function send() {
       let c = document.getElementById("colorSel").value;
@@ -41,3 +46,4 @@ const char index_html[] PROGMEM = R"rawliteral(
 </body>
 </html>
 )rawliteral";
+
