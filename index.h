@@ -38,6 +38,11 @@ const char *HTML_CONTENT = R""""(
         Z: %DATA5%
       <p>
 
+      <p>Accel X: %ACCEL_X%</p>
+      <p>Accel Y: %ACCEL_Y%</p>
+      <p>Accel Z: %ACCEL_Z%</p>
+
+
       <!-- Reloads page every 500 milliseconds -->
       <script>
         function reload() {
@@ -49,3 +54,4 @@ const char *HTML_CONTENT = R""""(
   </html>
 
 )"""";
+
