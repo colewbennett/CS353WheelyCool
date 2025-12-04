@@ -1,19 +1,10 @@
-/**************************************************************
-   ANDREW LIPTON – FULL COMBINED PROJECT
-   - Line Following (color-based)
-   - Motor Control w/ Microphone Stop
-   - Webserver + Accelerometer
-   - User selects color to follow from webpage
-**************************************************************/
-
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_LSM303_Accel.h>
-
-#include "index.h"   // webpage HTML
+#include "index.h"   // your webpage HTML
 
 /********************* WIFI CONFIG ***************************/
 const char* ssid     = "ESP32-LineBot";
@@ -24,7 +15,6 @@ WebServer server(80);
 #define LED_PIN    17
 #define LED_COUNT  16
 #define SENSOR_PIN A0
-
 Adafruit_NeoPixel ring(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 enum FollowColor { RED=0, GREEN=1, BLUE=2 };
@@ -32,6 +22,7 @@ volatile FollowColor targetColor = RED;
 
 /********************* ACCELEROMETER **************************/
 Adafruit_LSM303_Accel_Unified accel = Adafruit_LSM303_Accel_Unified(12345);
+float accelData[3] = {0,0,0};   // X, Y, Z
 
 /********************* MOTOR CONFIG ***************************/
 const int MIC_PIN  = A4;
@@ -43,7 +34,6 @@ const int IN3_PIN  = 7;
 const int IN4_PIN  = 10;
 
 void stopMotors();
-unsigned long lastMicTrigger = 0;
 
 /********************* LINE FOLLOWING *************************/
 struct DirectionResult {
@@ -52,22 +42,18 @@ struct DirectionResult {
   int leftMotor;
   int rightMotor;
 };
-
 DirectionResult getDirectionForColor(FollowColor color);
 
 /********************* MOTOR CONTROL **************************/
 void runMotors(int left, int right) {
-  // left
   digitalWrite(IN1_PIN, left >= 0);
   digitalWrite(IN2_PIN, left < 0);
   analogWrite(ENA_PIN, min(abs(left), 255));
 
-  // right
   digitalWrite(IN3_PIN, right >= 0);
   digitalWrite(IN4_PIN, right < 0);
   analogWrite(ENB_PIN, min(abs(right), 255));
 }
-
 void stopMotors() {
   analogWrite(ENA_PIN, 0);
   analogWrite(ENB_PIN, 0);
@@ -79,22 +65,25 @@ bool micDetectsClap() {
   for (int i = 0; i < 40; i++)
     total += analogRead(MIC_PIN);
   int value = total / 40;
-  return value > 550;   // threshold from your file
+  return value > 550;
 }
 
 /********************* WEB HANDLERS ***************************/
 void handleRoot() {
-  server.send(200, "text/html", index_html);
+  // Replace placeholders in HTML with current accel values
+  String html = index_html;
+  html.replace("%ACCEL_X%", String(accelData[0], 2));
+  html.replace("%ACCEL_Y%", String(accelData[1], 2));
+  html.replace("%ACCEL_Z%", String(accelData[2], 2));
+  server.send(200, "text/html", html);
 }
 
 void handleSetColor() {
   if (!server.hasArg("color")) return;
   String c = server.arg("color");
-
   if      (c == "red")   targetColor = RED;
   else if (c == "green") targetColor = GREEN;
   else if (c == "blue")  targetColor = BLUE;
-
   server.send(200, "text/plain", "OK");
 }
 
@@ -102,26 +91,26 @@ void handleSetColor() {
 void setup() {
   Serial.begin(115200);
 
-  // RING
+  // LED ring
   ring.begin();
   ring.show();
 
-  // MOTORS
-  pinMode(ENA_PIN, OUTPUT);
-  pinMode(IN1_PIN, OUTPUT);
-  pinMode(IN2_PIN, OUTPUT);
-  pinMode(ENB_PIN, OUTPUT);
-  pinMode(IN3_PIN, OUTPUT);
-  pinMode(IN4_PIN, OUTPUT);  
+  // Motors
+  pinMode(ENA_PIN, OUTPUT); pinMode(IN1_PIN, OUTPUT); pinMode(IN2_PIN, OUTPUT);
+  pinMode(ENB_PIN, OUTPUT); pinMode(IN3_PIN, OUTPUT); pinMode(IN4_PIN, OUTPUT);
   stopMotors();
 
-  // ACCEL
-  accel.begin();
+  // Accelerometer
+  if(!accel.begin()) {
+    Serial.println("Failed to initialize accelerometer!");
+    while(1);
+  }
 
-  // WIFI
+  // WiFi AP
   WiFi.softAP(ssid, password);
   Serial.println("AP Ready. Connect to WiFi.");
 
+  // Web server
   server.on("/", handleRoot);
   server.on("/setColor", handleSetColor);
   server.begin();
@@ -131,6 +120,13 @@ void setup() {
 void loop() {
   server.handleClient();
 
+  // --- read accelerometer ---
+  sensors_event_t event;
+  accel.getEvent(&event);
+  accelData[0] = event.acceleration.x;
+  accelData[1] = event.acceleration.y;
+  accelData[2] = event.acceleration.z;
+
   // --- microphone STOP override ---
   if (micDetectsClap()) {
     stopMotors();
@@ -138,24 +134,18 @@ void loop() {
     return;
   }
 
-  // --- get line-following direction for selected color ---
+  // --- line-following ---
   DirectionResult dir = getDirectionForColor(targetColor);
-
-  // convert index → left/right turn
   runMotors(dir.leftMotor, dir.rightMotor);
 
   delay(20);
 }
 
 /********************* LINE FOLLOW LOGIC ************************/
-
 DirectionResult getDirectionForColor(FollowColor color) {
-  int bestIndex = -1;
-  int bestValue = -1;
+  int bestIndex = -1, bestValue = -1;
 
-  // scan each LED direction
   for (int i = 0; i < LED_COUNT; i++) {
-    // set the ring to one color (but only mark current index)
     for (int j = 0; j < LED_COUNT; j++)
       ring.setPixelColor(j, (j == i ? ring.Color(
         color == RED ? 255 : 0,
@@ -163,30 +153,17 @@ DirectionResult getDirectionForColor(FollowColor color) {
         color == BLUE ? 255 : 0
       ) : 0));
     ring.show();
-
     delay(5);
-    int value = analogRead(SENSOR_PIN);
 
-    if (value > bestValue) {
-      bestValue = value;
-      bestIndex = i;
-    }
+    int value = analogRead(SENSOR_PIN);
+    if (value > bestValue) { bestValue = value; bestIndex = i; }
   }
 
-  // Convert LED index → motor recommendation
-  // index 0 = forward, >8 = turn right, <8 = turn left
-  int left = 200;
-  int right = 200;
-
+  int left = 200, right = 200;
   int offset = bestIndex - 0;
   if (offset < 0) offset += LED_COUNT;
-
-  if (offset > 8) {          // turn right
-    right -= (offset - 8) * 18;
-  } else {                   // turn left
-    left -= (8 - offset) * 18;
-  }
-
+  if (offset > 8) right -= (offset - 8) * 18;
+  else left -= (8 - offset) * 18;
   left = constrain(left, -255, 255);
   right = constrain(right, -255, 255);
 
