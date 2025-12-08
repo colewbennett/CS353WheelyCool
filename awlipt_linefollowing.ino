@@ -1,104 +1,204 @@
+//#include <Arduino.h>
+//#include <WiFi.h>
+//#include <WebServer.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_LSM303_Accel.h>
+#include "index.h"   // your webpage HTML
 
-#define LED_PIN    17
-#define LED_COUNT  16
-#define SENSOR_PIN A0
+/********************* WIFI CONFIG ***************************/
+// const char* ssid     = "ESP32-LineBot";
+// const char* password = "12345678";
+// WebServer server(80);
 
-Adafruit_NeoPixel ring(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+/********************* ACCELEROMETER **************************/
+Adafruit_LSM303_Accel_Unified accel = Adafruit_LSM303_Accel_Unified(12345);
+float accelData[3] = {0,0,0};   // X, Y, Z
 
-uint32_t scanColors[] = {
-  ring.Color(255, 0, 0),    // Red
-  ring.Color(0, 255, 0),    // Green
-  ring.Color(0, 0, 255)     // Blue
+/*************** COLOR ENUM ***************/
+enum FollowColor { RED, GREEN, BLUE };
+
+struct DirectionResult {
+  int index;
+  int strength;
+  int leftMotor;
+  int rightMotor;
 };
 
-const int numColors = 3;
+FollowColor targetColor = RED;
+ 
+/********************* WEB HANDLERS ***************************/
+// void handleRoot() {
+//   // Replace placeholders in HTML with current accel values
+//   String html = index_html;
+//   html.replace("%ACCEL_X%", String(accelData[0], 2));
+//   html.replace("%ACCEL_Y%", String(accelData[1], 2));
+//   html.replace("%ACCEL_Z%", String(accelData[2], 2));
+//   server.send(200, "text/html", html);
+// }
 
-int readings[numColors][LED_COUNT];
+// void handleSetColor() {
+//   if (!server.hasArg("color")) return;
+//   String c = server.arg("color");
+//   if      (c == "red")   targetColor = RED;
+//   else if (c == "green") targetColor = GREEN;
+//   else if (c == "blue")  targetColor = BLUE;
+//   server.send(200, "text/plain", "OK");
+// }
 
-int pixelIndex = 0;
-int colorIndex = 0;
+/**************** PIN SETUP ****************/
+#define ENA_PIN 5     // Motor A PWM
+#define IN1_PIN 2
+#define IN2_PIN 3
 
-int smooth(int oldVal, int newVal) {
-  return (oldVal * 0.7) + (newVal * 0.3);
-}
+#define ENB_PIN 6     // Motor B PWM
+#define IN3_PIN 4
+#define IN4_PIN 7
 
+#define LED_PIN 17     // NeoPixel ring
+#define LED_COUNT 16
+#define SENSOR_PIN A7
+
+/*************** NEOPIXEL SETUP ***************/
+Adafruit_NeoPixel ring(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+/*************** SAFE ESP32 PWM CHANNELS ***************/
+const int PWM_CHANNEL_A = 4;
+const int PWM_CHANNEL_B = 5;
+const int PWM_FREQ = 5000;
+const int PWM_RES = 8;
+
+
+/********************* SETUP ************************/
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
+
   ring.begin();
   ring.show();
-  ring.setBrightness(80);
+  ring.setBrightness(30);
 
-  for (int c = 0; c < numColors; c++)
-    for (int i = 0; i < LED_COUNT; i++)
-      readings[c][i] = 0;
+  pinMode(IN1_PIN, OUTPUT);
+  pinMode(IN2_PIN, OUTPUT);
+  pinMode(IN3_PIN, OUTPUT);
+  pinMode(IN4_PIN, OUTPUT);
+
+  ledcSetup(PWM_CHANNEL_A, PWM_FREQ, PWM_RES);
+  ledcSetup(PWM_CHANNEL_B, PWM_FREQ, PWM_RES);
+  ledcAttachPin(ENA_PIN, PWM_CHANNEL_A);
+  ledcAttachPin(ENB_PIN, PWM_CHANNEL_B);
+
+  // WiFi AP
+  // WiFi.softAP(ssid, password);
+  // Serial.println("AP Ready. Connect to WiFi.");
+
+  // // Web server
+  // server.on("/", handleRoot);
+  // server.on("/setColor", handleSetColor);
+  // server.begin();
 }
 
-void loop() {
+/********************* MOTOR CONTROL ************************/
+void setMotorA(int speed, int direction) {
+  if (direction > 0) {
+    digitalWrite(IN1_PIN, HIGH);
+    digitalWrite(IN2_PIN, LOW);
+  } else if (direction < 0) {
+    digitalWrite(IN1_PIN, LOW);
+    digitalWrite(IN2_PIN, HIGH);
+  } else {
+    digitalWrite(IN1_PIN, LOW);
+    digitalWrite(IN2_PIN, LOW);
+  }
+  ledcWrite(PWM_CHANNEL_A, abs(speed));
+}
 
-  ring.clear();
+void setMotorB(int speed, int direction) {
+  if (direction > 0) {
+    digitalWrite(IN3_PIN, HIGH);
+    digitalWrite(IN4_PIN, LOW);
+  } else if (direction < 0) {
+    digitalWrite(IN3_PIN, LOW);
+    digitalWrite(IN4_PIN, HIGH);
+  } else {
+    digitalWrite(IN3_PIN, LOW);
+    digitalWrite(IN4_PIN, LOW);
+  }
+  ledcWrite(PWM_CHANNEL_B, abs(speed));
+}
 
-  ring.setPixelColor(pixelIndex, scanColors[colorIndex]);
-  ring.show();
+void runMotors(int left, int right) {
+  setMotorA(abs(left), left > 0 ? 1 : (left < 0 ? -1 : 0));
+  setMotorB(abs(right), right > 0 ? 1 : (right < 0 ? -1 : 0));
+}
 
-  delay(5);
+/********************* DIRECTION SCAN ************************/
+DirectionResult getDirectionForColor(FollowColor color) {
 
-  int raw = analogRead(SENSOR_PIN);
-  readings[colorIndex][pixelIndex] =
-      smooth(readings[colorIndex][pixelIndex], raw);
+  int bestIndex = -1;
+  int bestValue = -1;
 
-  pixelIndex++;
+  for (int i = 0; i < LED_COUNT; i++) {
+    ring.clear();
+    ring.setPixelColor(i, ring.Color(
+      color == RED ? 255 : 0,
+      color == GREEN ? 255 : 0,
+      color == BLUE ? 255 : 0
+    ));
+    ring.show();
+    delay(8);
 
-  if (pixelIndex >= LED_COUNT) {
-    pixelIndex = 0;
-    colorIndex++;
+    // Read reflectance
+    int sensorValue = analogRead(SENSOR_PIN);
 
-    if (colorIndex >= numColors) {
-      colorIndex = 0;
-
-      analyzeScan();
+    if (sensorValue >= bestValue) {
+      bestValue = sensorValue;
+      bestIndex = i;
     }
   }
+  /**************** PROPORTIONAL STEERING ****************/
+  // Center direction is LED index 0
+  int offset = bestIndex;
+  //Serial.println(bestIndex);
+
+  int left = 170;
+  int right = 180;
+
+  if (offset == 0 || (offset <= 15 && offset >= 14)) {
+    left = 0;
+    right = 200;
+  } else if (offset == 1 || offset == 2) {
+    left = 170;
+    right = 180;
+  } else if (offset >= 3 && offset <=7 ) {
+    left = 200;
+    right = 0;
+  }
+
+  left = left;
+  right = right;
+  // Serial.print("Right: ");
+  // Serial.print(right);
+  // Serial.print(" Left: ");
+  // Serial.println(left);
+  return { bestIndex, bestValue, left, right };
+}
+
+/********************* MAIN LOOP ************************/
+void loop() {
+  //server.handleClient();
+
+  //--- read accelerometer ---
+  // sensors_event_t event;
+  // accel.getEvent(&event);
+  // accelData[0] = event.acceleration.x;
+  // accelData[1] = event.acceleration.y;
+  // accelData[2] = event.acceleration.z;
+
+  DirectionResult dir = getDirectionForColor(targetColor);
+
+  runMotors(dir.leftMotor, dir.rightMotor);
 
   delay(20);
 }
 
-void analyzeScan() {
 
-  int bestColor = -1;
-  int bestValue = -1;
-
-  int bestPixel = -1;
-
-  for (int c = 0; c < numColors; c++) {
-    for (int i = 0; i < LED_COUNT; i++) {
-
-      if (readings[c][i] > bestValue) {
-        bestValue = readings[c][i];
-        bestColor = c;
-        bestPixel = i;
-      }
-    }
-  }
-
-  const char* colorName =
-      (bestColor == 0 ? "RED" :
-       bestColor == 1 ? "GREEN" : "BLUE");
-
-  Serial.print("Strongest Color: ");
-  Serial.println(colorName);
-
-  Serial.print("Direction Index: ");
-  Serial.println(bestPixel);
-
-  int center = LED_COUNT / 2;
-
-  if (bestPixel < center - 1)
-    Serial.println("Move LEFT");
-  else if (bestPixel > center + 1)
-    Serial.println("Move RIGHT");
-  else
-    Serial.println("Move STRAIGHT");
-
-  Serial.println("----------------------------");
-}

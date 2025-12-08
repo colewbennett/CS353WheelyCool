@@ -1,57 +1,48 @@
-/*
- * Created by ArduinoGetStarted.com
- *
- * This example code is in the public domain
- *
- * Tutorial page: https://arduinogetstarted.com/tutorials/arduino-web-server
- */
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Line Bot Controller</title>
+  <style>
+    body {
+      font-family: Arial;
+      background:#222;
+      color:white;
+      text-align:center;
+      padding-top:40px;
+    }
+    select, button {
+      padding:10px;
+      font-size:18px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Line Follower Controller</h1>
 
-const char *HTML_CONTENT = R""""(
+  <h3>Select Line Color</h3>
+  <select id="colorSel">
+    <option value="red">Red</option>
+    <option value="green">Green</option>
+    <option value="blue">Blue</option>
+  </select>
 
-  <!DOCTYPE HTML>
-  <html>
-    <head>
-      <link rel=\"icon\" href=\"data:,\">
-      <style>
-        * {
-          font-size: 60px;
-          text-align: center;
-        }
-      </style>
-    </head>
+  <button onclick="send()">Apply</button>
 
-    <body>
-      <h1>
-        Accelerometer:
-      </h1>
-      <p>
-        X: %DATA0%<br>
-        Y: %DATA1%<br>
-        Z: %DATA2%
-      </p>
-      <h1>
-        Magnetometer:
-      </h1>
-      <p>
-        X: %DATA3%<br>
-        Y: %DATA4%<br>
-        Z: %DATA5%
-      <p>
-
-      <p>Accel X: %ACCEL_X%</p>
-      <p>Accel Y: %ACCEL_Y%</p>
-      <p>Accel Z: %ACCEL_Z%</p>
+  <p>Accel X: %ACCEL_X%</p>
+  <p>Accel Y: %ACCEL_Y%</p>
+  <p>Accel Z: %ACCEL_Z%</p>
 
 
-      <!-- Reloads page every 500 milliseconds -->
-      <script>
-        function reload() {
-          window.location.reload(1);
-        }
-        setTimeout(reload, 500);
-      </script>
-    </body>
-  </html>
-
-)"""";
-
+  <script>
+    function send() {
+      let c = document.getElementById("colorSel").value;
+      fetch("/setColor?color=" + c)
+        .then(r => r.text())
+        .then(alert);
+    }
+  </script>
+</body>
+</html>
+)rawliteral";
