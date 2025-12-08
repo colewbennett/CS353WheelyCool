@@ -9,18 +9,18 @@
     - DFRobotDFPlayerMini by DFRobot
 */
 
-#include "SoftwareSerial.h"
+
 #include "DFRobotDFPlayerMini.h"
 
 // --- MP3 Module Pins ---
-static const uint8_t PIN_MP3_RX = 10; 
-static const uint8_t PIN_MP3_TX = 11; 
-SoftwareSerial mySoftwareSerial(PIN_MP3_RX, PIN_MP3_TX);
+// RX2 = 16, TX2 = 17 (these are the defaults for the Nano ESP32)
+#define RXD2 9
+#define TXD2 12
 DFRobotDFPlayerMini myDFPlayer;
 
 // --- Ultrasonic Sensor Pins ---
-const int trigPin = 7;
-const int echoPin = 8;
+const int trigPin = 10;
+const int echoPin = 11;
 
 // --- Settings ---
 // The distance in cm at which the sound will trigger
@@ -35,8 +35,8 @@ void setup() {
   Serial.println("Initializing DFPlayer and Ultrasonic Sensor...");
 
   // Setup MP3 Module
-  mySoftwareSerial.begin(9600);
-  if (!myDFPlayer.begin(mySoftwareSerial)) {
+  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+  if (!myDFPlayer.begin(Serial2)) {
     Serial.println("Unable to begin DFPlayer:");
     Serial.println("1. Please recheck the connection!");
     Serial.println("2. Please insert the SD card!");
