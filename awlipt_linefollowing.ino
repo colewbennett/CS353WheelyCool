@@ -42,6 +42,32 @@ FollowColor targetColor = RED;
 // NOTE: On many ESP32 boards A7 is NOT defined. If you get a compile error, change SENSOR_PIN to a valid ADC pin (for example 34).
 #define SENSOR_PIN A7
 
+// ---- MIC ON ANALOG (ADAPTIVE ROTATING WINDOW) ----
+// If A0 is not defined on your ESP32 core, change this to the actual ADC GPIO (e.g., 36 or 34).
+#define MIC_PIN A0
+
+const int MIC_SAMPLES = 40;       // samples per loudness reading
+
+// rotating window parameters
+const int WINDOW_SIZE = 30;       // number of recent loudness readings to track
+const int ADAPT_MARGIN = 10;      // how much above baseline counts as loud
+const int MIN_BASELINE = 2;       // floor so baseline never goes to 0
+const int MIN_EVENT_LOUDNESS = 5; // ignore extremely tiny values
+const int EVENT_HITS_NEED = 2;    // how many consecutive hits required
+
+const unsigned long MIC_SAMPLE_INTERVAL_MS = 60;  // how often to measure loudness
+const unsigned long PAUSE_DURATION_MS = 5000;     // stop motors this long on loud sound
+
+int  loudnessWindow[WINDOW_SIZE];
+int  windowIndex = 0;
+bool windowFilled = false;
+unsigned long lastMicSampleTime = 0;
+int  consecutiveHits = 0;
+bool loudEventPending = false;
+
+bool motorsPaused = false;
+unsigned long pauseStartMs = 0;
+
 /*************** NEOPIXEL SETUP ***************/
 Adafruit_NeoPixel ring(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -73,14 +99,89 @@ void handleSetColor() {
   server.send(200, "text/plain", "OK");
 }
 
+/********************* MIC HELPERS ****************************/
+
+int readMicLoudness() {
+  long sum = 0;
+
+  // get DC offset for this instant
+  for (int i = 0; i < MIC_SAMPLES; i++) {
+    int raw = analogRead(MIC_PIN);
+    sum += raw;
+  }
+  int offset = sum / MIC_SAMPLES;
+
+  // average absolute deviation from that offset
+  long totalDev = 0;
+  for (int i = 0; i < MIC_SAMPLES; i++) {
+    int raw = analogRead(MIC_PIN);
+    int deviation = raw - offset;
+    if (deviation < 0) deviation = -deviation;
+    totalDev += deviation;
+  }
+
+  int avgDeviation = totalDev / MIC_SAMPLES;
+  return avgDeviation;
+}
+
+// rotating window + adaptive threshold, non-blocking
+void updateMicRotatingWindow(unsigned long now) {
+  if (now - lastMicSampleTime < MIC_SAMPLE_INTERVAL_MS) {
+    return;  // not time for a new sample yet
+  }
+  lastMicSampleTime = now;
+
+  int loudness = readMicLoudness();
+
+  // store into rotating window
+  loudnessWindow[windowIndex] = loudness;
+  windowIndex++;
+  if (windowIndex >= WINDOW_SIZE) {
+    windowIndex = 0;
+    windowFilled = true;
+  }
+
+  int count = windowFilled ? WINDOW_SIZE : windowIndex;
+  long sum = 0;
+  for (int i = 0; i < count; i++) {
+    sum += loudnessWindow[i];
+  }
+
+  float baseline = (count > 0) ? (float)sum / (float)count : 0.0f;
+  if (baseline < MIN_BASELINE) baseline = MIN_BASELINE;
+  int threshold = (int)(baseline + ADAPT_MARGIN);
+
+  // debugging / tuning
+  Serial.print("mic loud=");
+  Serial.print(loudness);
+  Serial.print(" base=");
+  Serial.print(baseline);
+  Serial.print(" thr=");
+  Serial.println(threshold);
+
+  // check for event
+  if (windowFilled && loudness > threshold && loudness > MIN_EVENT_LOUDNESS) {
+    consecutiveHits++;
+  } else {
+    if (consecutiveHits > 0) consecutiveHits--;
+  }
+
+  if (consecutiveHits >= EVENT_HITS_NEED) {
+    loudEventPending = true;
+    consecutiveHits = 0;
+    Serial.println("  -> ADAPTIVE LOUD EVENT DETECTED");
+  }
+}
+
 /********************* SETUP ************************/
 void setup() {
   // Serial start
   Serial.begin(115200);
 
   // Short initial delay to allow USB host to stabilize power during flashing.
-  // This helps avoid brownouts that close the USB serial during upload.
   delay(2000);
+
+  pinMode(MIC_PIN, INPUT);
 
   // Configure motor pins as outputs and ensure motors are off while we initialize.
   pinMode(IN1_PIN, OUTPUT);
@@ -114,7 +215,14 @@ void setup() {
   ring.clear();
   ring.show();
 
-  // Another short pause before enabling WiFi/AP. Staggering these prevents a big simultaneous current draw.
+  // init mic window state
+  for (int i = 0; i < WINDOW_SIZE; i++) {
+    loudnessWindow[i] = 0;
+  }
+  lastMicSampleTime = millis();
+  motorsPaused = false;
+
+  // Another short pause before enabling WiFi/AP.
   delay(1500);
 
   // Start WiFi Access Point (after we've settled other peripherals)
@@ -127,7 +235,6 @@ void setup() {
   server.begin();
 
   // After everything is up and stable, increase NeoPixel brightness a bit for normal operation.
-  // This is done after WiFi/AP to avoid a simultaneous spike.
   delay(500);
   ring.setBrightness(30); // set to your normal brightness (lower is safer)
   ring.show();
@@ -227,6 +334,8 @@ DirectionResult getDirectionForColor(FollowColor color) {
 void loop() {
   server.handleClient();
 
+  unsigned long now = millis();
+
   // read accelerometer
   sensors_event_t event;
   accel.getEvent(&event);
@@ -234,8 +343,31 @@ void loop() {
   accelData[1] = event.acceleration.y;
   accelData[2] = event.acceleration.z;
 
-  DirectionResult dir = getDirectionForColor(targetColor);
+  // update adaptive mic window
+  updateMicRotatingWindow(now);
 
+  // if not already paused and loud event detected, start 5s pause
+  if (!motorsPaused && loudEventPending) {
+    loudEventPending = false;
+    motorsPaused = true;
+    pauseStartMs = now;
+    runMotors(0, 0);
+    Serial.println("LOUD EVENT -> motors paused for 5s");
+  }
+
+  // handle pause window
+  if (motorsPaused) {
+    runMotors(0, 0);
+    if (now - pauseStartMs >= PAUSE_DURATION_MS) {
+      motorsPaused = false;
+      Serial.println("Pause over -> motors resume");
+    }
+    delay(10);
+    return;
+  }
+
+  // normal color-following behavior
+  DirectionResult dir = getDirectionForColor(targetColor);
   runMotors(dir.leftMotor, dir.rightMotor);
 
   delay(20);
